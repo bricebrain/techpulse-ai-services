@@ -1,5 +1,6 @@
 import base64
 import io
+import math
 import os
 import subprocess
 import tempfile
@@ -116,6 +117,61 @@ def get_whisper_model(model_name: str, device: str, compute_type: str):
     return WHISPER_MODELS[cache_key]
 
 
+def word_count(text: str) -> int:
+    return len([part for part in text.replace("'", " ").split() if part.strip()])
+
+
+def compute_audio_features(audio_path: str, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not segments:
+        return []
+
+    try:
+        import numpy as np
+        import soundfile as sf
+
+        audio, sample_rate = sf.read(audio_path, dtype="float32", always_2d=True)
+        mono = audio.mean(axis=1)
+    except Exception:
+        return [{} for _ in segments]
+
+    features: list[dict[str, Any]] = []
+    for segment in segments:
+        start = max(0, int(float(segment["start"]) * sample_rate))
+        end = min(len(mono), int(float(segment["end"]) * sample_rate))
+        samples = mono[start:end]
+        duration = max(0.001, float(segment["end"]) - float(segment["start"]))
+
+        if samples.size == 0:
+            features.append({
+                "duration": round(duration, 3),
+                "rms": 0,
+                "peak": 0,
+                "words_per_minute": 0,
+                "energy": "silent",
+            })
+            continue
+
+        rms = float(math.sqrt(float(np.mean(np.square(samples)))))
+        peak = float(np.max(np.abs(samples)))
+        words_per_minute = (word_count(str(segment.get("text") or "")) / duration) * 60
+        if rms < 0.015:
+            energy = "low"
+        elif rms < 0.05:
+            energy = "medium"
+        else:
+            energy = "high"
+
+        features.append({
+            "duration": round(duration, 3),
+            "rms": round(rms, 5),
+            "peak": round(peak, 5),
+            "words_per_minute": round(words_per_minute, 1),
+            "energy": energy,
+        })
+
+    return features
+
+
 def write_audio_payload(payload: dict[str, Any], tmpdir: str) -> str:
     audio_url = str(payload.get("audio_url") or "").strip()
     audio_base64 = str(payload.get("audio_base64") or "").strip()
@@ -153,6 +209,8 @@ def handle_whisper_transcribe(payload: dict[str, Any]) -> dict[str, Any]:
     language = payload.get("language") or "en"
     beam_size = int(payload.get("beam_size") or 5)
     vad_filter = bool(payload.get("vad_filter", True))
+    word_timestamps = bool(payload.get("word_timestamps", True))
+    audio_features = bool(payload.get("audio_features", True))
     initial_prompt = str(payload.get("initial_prompt") or "").strip() or None
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -163,23 +221,51 @@ def handle_whisper_transcribe(payload: dict[str, Any]) -> dict[str, Any]:
             language=str(language) if language else None,
             beam_size=beam_size,
             vad_filter=vad_filter,
+            word_timestamps=word_timestamps,
             initial_prompt=initial_prompt,
         )
-        segments = [
-            {
+        segments = []
+        for segment in segments_iter:
+            if not segment.text or not segment.text.strip():
+                continue
+            item: dict[str, Any] = {
                 "start": round(float(segment.start), 3),
                 "end": round(float(segment.end), 3),
                 "text": segment.text.strip(),
+                "speaker": None,
+                "voice_profile": None,
             }
-            for segment in segments_iter
-            if segment.text and segment.text.strip()
-        ]
+            words = getattr(segment, "words", None)
+            if words:
+                item["words"] = [
+                    {
+                        "word": word.word.strip(),
+                        "start": round(float(word.start), 3),
+                        "end": round(float(word.end), 3),
+                        "probability": round(float(getattr(word, "probability", 0) or 0), 4),
+                    }
+                    for word in words
+                    if word.word and word.word.strip()
+                ]
+            segments.append(item)
+
+        if audio_features:
+            for segment, features in zip(segments, compute_audio_features(audio_path, segments), strict=False):
+                segment["audio_features"] = features
 
     text = " ".join(segment["text"] for segment in segments).strip()
     return {
         "task": "transcribe.whisper",
         "provider": "runpod",
         "model": model_name,
+        "device": device,
+        "compute_type": compute_type,
+        "word_timestamps": word_timestamps,
+        "audio_features": audio_features,
+        "diarization": {
+            "available": False,
+            "reason": "speaker diarization is not enabled in this image yet",
+        },
         "language": getattr(info, "language", language),
         "language_probability": round(float(getattr(info, "language_probability", 0) or 0), 4),
         "duration": round(float(getattr(info, "duration", 0) or 0), 3),
@@ -241,7 +327,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
     try:
         if task == "tts.kokoro":
             return {"ok": True, "output": handle_kokoro_tts(payload)}
-        if task == "transcribe.whisper":
+        if task in {"transcribe.whisper", "audio.intelligence"}:
             return {"ok": True, "output": handle_whisper_transcribe(payload)}
         raise ValueError(f"unsupported task: {task}")
     except Exception as exc:
