@@ -3,3 +3,4 @@ boto3>=1.34
 kokoro>=0.9.4
 numpy>=1.26
 soundfile>=0.12
+faster-whisper>=1.1.1

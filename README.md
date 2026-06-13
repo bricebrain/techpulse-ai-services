@@ -2,13 +2,13 @@
 
 RunPod Serverless worker pour les modeles IA lourds mutualisables.
 
-Phase 1 cible TechPulse uniquement :
+Phase 1 cible TechPulse et English Fluency :
 
 - `tts.kokoro` : generation audio podcast via `hexgrad/Kokoro-82M`
+- `transcribe.whisper` : transcription audio via `faster-whisper`
 
 Phases suivantes :
 
-- `transcribe.whisper`
 - `embed.bge_m3`
 - `rerank.bge`
 
@@ -43,6 +43,9 @@ R2_ACCESS_KEY_ID=...
 R2_SECRET_ACCESS_KEY=...
 R2_BUCKET=techpulse-podcasts
 R2_PUBLIC_BASE_URL=https://...
+WHISPER_MODEL=large-v3-turbo
+WHISPER_DEVICE=cuda
+WHISPER_COMPUTE_TYPE=float16
 ```
 
 `R2_PUBLIC_BASE_URL` est optionnel. Si absent, le worker retourne le base64 audio.
@@ -77,6 +80,37 @@ R2_PUBLIC_BASE_URL=https://...
     "audio_url": null,
     "audio_base64": "...",
     "byte_length": 12345
+  }
+}
+```
+
+## Input RunPod transcription
+
+```json
+{
+  "input": {
+    "task": "transcribe.whisper",
+    "audio_url": "https://englishfluency-worker.bricebrain.workers.dev/audio/audio-book-lesson/L005-LESSON.mp3",
+    "language": "en",
+    "initial_prompt": "Short English learning lesson. Clear educational sentences."
+  }
+}
+```
+
+## Sortie transcription
+
+```json
+{
+  "ok": true,
+  "output": {
+    "task": "transcribe.whisper",
+    "provider": "runpod",
+    "model": "large-v3-turbo",
+    "language": "en",
+    "text": "Good afternoon...",
+    "segments": [
+      { "start": 0.0, "end": 2.4, "text": "Good afternoon..." }
+    ]
   }
 }
 ```

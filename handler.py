@@ -4,12 +4,14 @@ import os
 import subprocess
 import tempfile
 import time
+import urllib.request
 import uuid
 from typing import Any
 
 import runpod
 
 PIPELINES: dict[str, Any] = {}
+WHISPER_MODELS: dict[str, Any] = {}
 DEFAULT_VOICE_MAP = {
     "host": "ff_siwis",
     "analyst": "ff_siwis",
@@ -101,6 +103,86 @@ def upload_to_r2(audio_bytes: bytes, key: str, content_type: str) -> str | None:
     return None
 
 
+def get_whisper_model(model_name: str, device: str, compute_type: str):
+    cache_key = f"{model_name}|{device}|{compute_type}"
+    if cache_key not in WHISPER_MODELS:
+        from faster_whisper import WhisperModel
+
+        WHISPER_MODELS[cache_key] = WhisperModel(
+            model_name,
+            device=device,
+            compute_type=compute_type,
+        )
+    return WHISPER_MODELS[cache_key]
+
+
+def write_audio_payload(payload: dict[str, Any], tmpdir: str) -> str:
+    audio_url = str(payload.get("audio_url") or "").strip()
+    audio_base64 = str(payload.get("audio_base64") or "").strip()
+
+    audio_path = os.path.join(tmpdir, "input_audio")
+    if audio_url:
+        with urllib.request.urlopen(audio_url, timeout=60) as response:
+            audio_bytes = response.read()
+        if not audio_bytes:
+            raise ValueError("audio_url returned empty body")
+        with open(audio_path, "wb") as file:
+            file.write(audio_bytes)
+        return audio_path
+
+    if audio_base64:
+        with open(audio_path, "wb") as file:
+            file.write(base64.b64decode(audio_base64))
+        return audio_path
+
+    raise ValueError("audio_url or audio_base64 is required")
+
+
+def handle_whisper_transcribe(payload: dict[str, Any]) -> dict[str, Any]:
+    started_at = time.time()
+    model_name = str(payload.get("model") or os.getenv("WHISPER_MODEL") or "large-v3-turbo")
+    device = str(payload.get("device") or os.getenv("WHISPER_DEVICE") or "cuda")
+    compute_type = str(payload.get("compute_type") or os.getenv("WHISPER_COMPUTE_TYPE") or "float16")
+    language = payload.get("language") or "en"
+    beam_size = int(payload.get("beam_size") or 5)
+    vad_filter = bool(payload.get("vad_filter", True))
+    initial_prompt = str(payload.get("initial_prompt") or "").strip() or None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audio_path = write_audio_payload(payload, tmpdir)
+        model = get_whisper_model(model_name, device=device, compute_type=compute_type)
+        segments_iter, info = model.transcribe(
+            audio_path,
+            language=str(language) if language else None,
+            beam_size=beam_size,
+            vad_filter=vad_filter,
+            initial_prompt=initial_prompt,
+        )
+        segments = [
+            {
+                "start": round(float(segment.start), 3),
+                "end": round(float(segment.end), 3),
+                "text": segment.text.strip(),
+            }
+            for segment in segments_iter
+            if segment.text and segment.text.strip()
+        ]
+
+    text = " ".join(segment["text"] for segment in segments).strip()
+    return {
+        "task": "transcribe.whisper",
+        "provider": "runpod",
+        "model": model_name,
+        "language": getattr(info, "language", language),
+        "language_probability": round(float(getattr(info, "language_probability", 0) or 0), 4),
+        "duration": round(float(getattr(info, "duration", 0) or 0), 3),
+        "text": text,
+        "segments": segments,
+        "segment_count": len(segments),
+        "duration_ms": int((time.time() - started_at) * 1000),
+    }
+
+
 def handle_kokoro_tts(payload: dict[str, Any]) -> dict[str, Any]:
     started_at = time.time()
     text = str(payload.get("text") or "").strip()
@@ -152,6 +234,8 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
     try:
         if task == "tts.kokoro":
             return {"ok": True, "output": handle_kokoro_tts(payload)}
+        if task == "transcribe.whisper":
+            return {"ok": True, "output": handle_whisper_transcribe(payload)}
         raise ValueError(f"unsupported task: {task}")
     except Exception as exc:
         return {"ok": False, "error": str(exc), "task": task}
