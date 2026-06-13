@@ -122,7 +122,14 @@ def write_audio_payload(payload: dict[str, Any], tmpdir: str) -> str:
 
     audio_path = os.path.join(tmpdir, "input_audio")
     if audio_url:
-        with urllib.request.urlopen(audio_url, timeout=60) as response:
+        request = urllib.request.Request(
+            audio_url,
+            headers={
+                "User-Agent": "TechPulse-AI-Services/1.0 (+https://runpod.io)",
+                "Accept": "audio/mpeg,audio/*,*/*",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=60) as response:
             audio_bytes = response.read()
         if not audio_bytes:
             raise ValueError("audio_url returned empty body")
