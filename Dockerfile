@@ -15,12 +15,12 @@ RUN apt-get update \
     python3-pip \
   && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /
 
 COPY requirements.txt .
 RUN python3 -m pip install --upgrade pip \
   && python3 -m pip install -r requirements.txt
 
-COPY handler.py .
+COPY handler.py /handler.py
 
-CMD ["python3", "-u", "handler.py"]
+CMD ["python3", "-u", "/handler.py"]
