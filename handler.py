@@ -11,6 +11,8 @@ from typing import Any
 
 import runpod
 
+print("techpulse-ai-services booting", flush=True)
+
 PIPELINES: dict[str, Any] = {}
 WHISPER_MODELS: dict[str, Any] = {}
 DEFAULT_VOICE_MAP = {
@@ -109,6 +111,7 @@ def get_whisper_model(model_name: str, device: str, compute_type: str):
     if cache_key not in WHISPER_MODELS:
         from faster_whisper import WhisperModel
 
+        print(f"loading whisper model={model_name} device={device} compute_type={compute_type}", flush=True)
         WHISPER_MODELS[cache_key] = WhisperModel(
             model_name,
             device=device,
@@ -203,7 +206,7 @@ def write_audio_payload(payload: dict[str, Any], tmpdir: str) -> str:
 
 def handle_whisper_transcribe(payload: dict[str, Any]) -> dict[str, Any]:
     started_at = time.time()
-    model_name = str(payload.get("model") or os.getenv("WHISPER_MODEL") or "large-v3-turbo")
+    model_name = str(payload.get("model") or os.getenv("WHISPER_MODEL") or "medium")
     device = str(payload.get("device") or os.getenv("WHISPER_DEVICE") or "cuda")
     compute_type = str(payload.get("compute_type") or os.getenv("WHISPER_COMPUTE_TYPE") or "float16")
     language = payload.get("language") or "en"
@@ -325,13 +328,25 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
     payload = job.get("input") or {}
     task = str(payload.get("task") or "tts.kokoro")
     try:
+        if task == "health":
+            return {
+                "ok": True,
+                "output": {
+                    "task": "health",
+                    "provider": "runpod",
+                    "cuda_visible_devices": os.getenv("CUDA_VISIBLE_DEVICES"),
+                    "whisper_device": os.getenv("WHISPER_DEVICE"),
+                    "whisper_compute_type": os.getenv("WHISPER_COMPUTE_TYPE"),
+                },
+            }
         if task == "tts.kokoro":
             return {"ok": True, "output": handle_kokoro_tts(payload)}
         if task in {"transcribe.whisper", "audio.intelligence"}:
             return {"ok": True, "output": handle_whisper_transcribe(payload)}
         raise ValueError(f"unsupported task: {task}")
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "task": task}
+        return {"ok": False, "error": str(exc), "error_type": type(exc).__name__, "task": task}
 
 
+print("starting runpod serverless handler", flush=True)
 runpod.serverless.start({"handler": handler})
